@@ -1,0 +1,327 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>⭐ Attrape les Étoiles - Jeu Phaser</title>
+<style>
+  html, body {
+    height: 100%;
+    margin: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background-image: url('space.jpg');
+    background-size: cover;
+    background-position: center;
+    overflow: hidden;
+  }
+  canvas {
+    border: 4px solid #61dafb;
+    box-shadow: 0 0 20px rgba(97,218,251,0.5);
+    max-width: 100%;
+    max-height: 100%;
+  }
+</style>
+</head>
+<body>
+<script src="//cdn.jsdelivr.net/npm/phaser@3/dist/phaser.min.js"></script>
+<script>
+const GAME_WIDTH = 700;
+const GAME_HEIGHT = 500;
+// Ces valeurs seront modifiées en cours de jeu
+let PLAYER_SPEED = 180;
+let STAR_OBSTACLE_VELOCITY = 120;
+
+const INITIAL_TIME = 20;
+const MAX_ATTEMPTS = 3;
+// --- Suppression de 'level' ---
+let score = 0;
+let bestScore = 0;
+let attempts = 0;
+
+const config = {
+  type: Phaser.AUTO,
+  width: GAME_WIDTH,
+  height: GAME_HEIGHT,
+  backgroundColor: '#000000',
+  physics: { default: 'arcade', arcade: { gravity: { y: 0 }, debug: false } },
+  scene: [MenuScene, GameScene]
+};
+
+// ---------- MENU ----------
+function MenuScene() { Phaser.Scene.call(this, { key: 'MenuScene' }); }
+MenuScene.prototype = Object.create(Phaser.Scene.prototype);
+MenuScene.prototype.constructor = MenuScene;
+MenuScene.prototype.create = function() {
+  bestScore = parseInt(localStorage.getItem("bestScore")) || 0;
+  this.add.text(GAME_WIDTH/2,100,"⭐ Attrape les Étoiles ⭐",{font:"48px Arial",fill:"#ffd700",stroke:"#000",strokeThickness:5}).setOrigin(0.5);
+  this.add.text(GAME_WIDTH/2,180,"Évite les obstacles et les pièges !",{font:"22px Arial",fill:"#fff"}).setOrigin(0.5);
+  this.add.text(GAME_WIDTH/2,230,`🏆 Meilleur score : ${bestScore}`,{font:"24px Arial",fill:"#00ffcc"}).setOrigin(0.5);
+
+  let startButton=this.add.text(GAME_WIDTH/2,320,"▶️ JOUER",{font:"40px Arial",fill:"#61dafb",backgroundColor:"rgba(0,0,0,0.4)",padding:{x:20,y:10}})
+    .setOrigin(0.5).setInteractive();
+  startButton.on('pointerover',()=>startButton.setStyle({fill:"#00ffcc"}));
+  startButton.on('pointerout',()=>startButton.setStyle({fill:"#61dafb"}));
+  // --- Reset des variables de difficulté au lancement ---
+  startButton.on('pointerdown',()=>{
+    attempts=0;
+    PLAYER_SPEED=180;
+    STAR_OBSTACLE_VELOCITY=120;
+    this.scene.start('GameScene');
+  });
+};
+
+// ---------- JEU ----------
+function GameScene() { Phaser.Scene.call(this, { key: 'GameScene' }); }
+GameScene.prototype = Object.create(Phaser.Scene.prototype);
+GameScene.prototype.constructor = GameScene;
+
+let player, stars, obstacles, penalties, scoreText, timerText, quitButton;
+let timeRemaining, gameOver, isPaused, timedEvent, starsBackground;
+
+GameScene.prototype.preload = function() {
+  this.load.image('player','https://img.icons8.com/?size=100&id=6i4Qo8olPCbi&format=png&color=000000');
+  this.load.image('star','https://img.icons8.com/?size=100&id=XBMnwwJYQvfN&format=png&color=000000');
+  this.load.image('block','https://img.icons8.com/?size=100&id=mPi7pleoPcFL&format=png&color=000000');
+  this.load.image('penalty','https://img.icons8.com/?size=100&id=22464&format=png&color=ff0000');
+};
+
+GameScene.prototype.create = function() {
+  gameOver=false; isPaused=false; timeRemaining=INITIAL_TIME; score=0;
+  bestScore=parseInt(localStorage.getItem("bestScore"))||0;
+
+  // Fond étoilé
+  starsBackground=[];
+  for(let i=0;i<100;i++){
+    let s=this.add.circle(Math.random()*GAME_WIDTH,Math.random()*GAME_HEIGHT,Phaser.Math.Between(1,2),0xffffff,Math.random());
+    starsBackground.push(s);
+  }
+
+  this.add.text(10,10,'ZQSD / flèches: bouger | P: pause | Échap: quitter',{font:'16px Arial',fill:"#fff"});
+  // --- Texte du score mis à jour (sans niveau) ---
+  scoreText=this.add.text(GAME_WIDTH-10,10,`Étoiles: ${score}`,{font:'18px Arial',fill:'#ffd700'}).setOrigin(1,0);
+
+  timerText = this.add.text(
+    GAME_WIDTH - 10, 40,
+    '⏱️ Chronomètre: ' + formatTime(timeRemaining),
+    { font: 'bold 24px Arial', fill: '#00ffff', stroke: '#000', strokeThickness: 4 }
+  ).setOrigin(1, 0);
+
+  quitButton=this.add.text(GAME_WIDTH-10,110,"",{font:"18px Arial",fill:"#ff5555"}).setOrigin(1,0).setInteractive();
+  quitButton.on('pointerdown',()=>quitToMenu.call(this));
+
+  timedEvent=this.time.addEvent({delay:1000,callback:onTimeUpdate,callbackScope:this,loop:true});
+
+  player=this.physics.add.image(GAME_WIDTH/2,GAME_HEIGHT/2,'player').setScale(0.4).setCollideWorldBounds(true).setTint(0x61dafb);
+  this.playerTrail=this.add.group();
+
+  obstacles=this.physics.add.group();
+  penalties=this.physics.add.group();
+  stars=this.physics.add.group();
+
+  // --- Utilisation des nouvelles fonctions de spawn ---
+  // Spawn des étoiles initiales
+  spawnStars.call(this, 20);
+
+  // Spawn des obstacles initiaux
+  for(let i = 0; i < 3; i++) {
+    spawnObstacle.call(this);
+  }
+  // --- Fin des nouvelles fonctions de spawn ---
+
+  this.physics.add.overlap(player,stars,collectStar,null,this);
+  this.physics.add.overlap(player,penalties,hitPenalty,null,this);
+  this.physics.add.collider(player,obstacles,hitObstacle,null,this);
+
+  this.cursors=this.input.keyboard.createCursorKeys();
+  this.keys=this.input.keyboard.addKeys({
+    up:Phaser.Input.Keyboard.KeyCodes.Z,left:Phaser.Input.Keyboard.KeyCodes.Q,
+    down:Phaser.Input.Keyboard.KeyCodes.S,right:Phaser.Input.Keyboard.KeyCodes.D,
+    pause:Phaser.Input.Keyboard.KeyCodes.P, quit:Phaser.Input.Keyboard.KeyCodes.ESC
+  });
+};
+
+// ---------- SONS ----------
+function playBeep() { // timer urgent
+  try { const ctx=new (window.AudioContext||window.webkitAudioContext)(); const o=ctx.createOscillator(); const g=ctx.createGain(); o.connect(g); g.connect(ctx.destination); o.type='sine'; o.frequency.value=700; g.gain.setValueAtTime(0.2, ctx.currentTime); o.start(); o.stop(ctx.currentTime+0.15);} catch(e){console.warn("Audio non supporté");}
+}
+function playPenaltySound(){ try{ const ctx=new (window.AudioContext||window.webkitAudioContext)(); const o=ctx.createOscillator(); const g=ctx.createGain(); o.connect(g); g.connect(ctx.destination); o.type='square'; o.frequency.value=250; g.gain.setValueAtTime(0.3,ctx.currentTime); o.start(); o.stop(ctx.currentTime+0.25);} catch(e){console.warn("Audio non supporté");} }
+function playObstacleSound(){ try{ const ctx=new (window.AudioContext||window.webkitAudioContext)(); const o=ctx.createOscillator(); const g=ctx.createGain(); o.connect(g); g.connect(ctx.destination); o.type='sawtooth'; o.frequency.value=150; g.gain.setValueAtTime(0.4,ctx.currentTime); o.start(); o.stop(ctx.currentTime+0.4);} catch(e){console.warn("Audio non supporté");} }
+function playStarSound(){ try{ const ctx=new (window.AudioContext||window.webkitAudioContext)(); const o=ctx.createOscillator(); const g=ctx.createGain(); o.connect(g); g.connect(ctx.destination); o.type='triangle'; o.frequency.value=600; g.gain.setValueAtTime(0.3,ctx.currentTime); o.start(); o.stop(ctx.currentTime+0.15);} catch(e){console.warn("Audio non supporté");} }
+
+// ---------- CHRONOMÈTRE INTERACTIF ----------
+function updateTimerVisual(scene) {
+  if (!timerText) return;
+  if (timeRemaining > 10) { timerText.setColor('#00ffff'); timerText.setScale(1); }
+  else if (timeRemaining > 5) { timerText.setColor('#ffaa00'); timerText.setScale(1.1); }
+  else { timerText.setColor('#ff4444'); timerText.setScale(1.25); scene.tweens.add({targets:timerText,alpha:0.3,yoyo:true,duration:200,repeat:0}); playBeep(); }
+}
+
+// ---------- LOGIQUE DU TEMPS ----------
+function formatTime(sec){const m=Math.floor(sec/60);const s=sec%60;return `${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`;}
+function onTimeUpdate(){ if(gameOver||isPaused)return; timeRemaining--; timerText.setText('⏱️: '+formatTime(timeRemaining)); updateTimerVisual(this); if(timeRemaining<=0) failLevel.call(this,"⏰ Temps écoulé !"); }
+
+// ---------- UPDATE ----------
+GameScene.prototype.update=function(){
+  if(Phaser.Input.Keyboard.JustDown(this.keys.pause)) togglePause.call(this);
+  if(Phaser.Input.Keyboard.JustDown(this.keys.quit)) quitToMenu.call(this);
+  starsBackground.forEach(s=>{s.y+=0.3;if(s.y>GAME_HEIGHT)s.y=0;});
+  if(isPaused||gameOver)return;
+
+  // La vitesse du joueur s'adapte car PLAYER_SPEED est modifiée
+  player.setVelocity(0);
+  if(this.cursors.left.isDown||this.keys.left.isDown)player.setVelocityX(-PLAYER_SPEED);
+  if(this.cursors.right.isDown||this.keys.right.isDown)player.setVelocityX(PLAYER_SPEED);
+  if(this.cursors.up.isDown||this.keys.up.isDown)player.setVelocityY(-PLAYER_SPEED);
+  if(this.cursors.down.isDown||this.keys.down.isDown)player.setVelocityY(PLAYER_SPEED);
+  spawnTrail.call(this,player.x,player.y);
+};
+
+// ---------- TRAÎNÉE ----------
+function spawnTrail(x,y){
+  // --- Couleur basée sur le score (par palier de 10) ---
+  let difficultyTier = Math.floor(score / 10);
+  let c=[0xffffaa,0xffaa00,0xff55ff,0x55ffff][difficultyTier % 4];
+  let t=this.add.circle(x,y,Phaser.Math.Between(2,5),c,0.6);
+  this.tweens.add({targets:t,alpha:0,scale:0,duration:500,onComplete:()=>t.destroy()});
+}
+
+// ---------- INTERACTIONS ----------
+
+// --- NOUVELLE FONCTION pour faire apparaître des étoiles ---
+function spawnStars(count) {
+  for (let i = 0; i < count; i++) {
+    let x = Phaser.Math.Between(50, GAME_WIDTH - 50);
+    let y = Phaser.Math.Between(50, GAME_HEIGHT - 50);
+    let star = stars.create(x, y, 'star');
+
+    star.setScale(0.25).setCollideWorldBounds(true).setBounce(1);
+    // Utilise la vélocité actuelle (qui augmente avec le score)
+    star.setVelocity(Phaser.Math.Between(-STAR_OBSTACLE_VELOCITY, STAR_OBSTACLE_VELOCITY),
+                     Phaser.Math.Between(-STAR_OBSTACLE_VELOCITY, STAR_OBSTACLE_VELOCITY));
+  }
+}
+
+// --- NOUVELLE FONCTION pour faire apparaître un obstacle ---
+function spawnObstacle() {
+    let x = Phaser.Math.Between(50, GAME_WIDTH - 50);
+    let y = Phaser.Math.Between(50, GAME_HEIGHT - 50);
+
+    // Évite de spawner sur le joueur (simple vérification de distance)
+    if (Phaser.Math.Distance.Between(x, y, player.x, player.y) < 100) {
+        x = (x + 150) % GAME_WIDTH;
+        y = (y + 150) % GAME_HEIGHT;
+    }
+
+    let o = obstacles.create(x, y, 'block');
+    o.setScale(0.6).setCollideWorldBounds(true).setBounce(1);
+    // Utilise la vélocité actuelle (qui augmente avec le score)
+    o.setVelocity(Phaser.Math.Between(-STAR_OBSTACLE_VELOCITY, STAR_OBSTACLE_VELOCITY),
+                  Phaser.Math.Between(-STAR_OBSTACLE_VELOCITY, STAR_OBSTACLE_VELOCITY));
+}
+
+
+// --- Fonction collectStar MODIFIÉE ---
+function collectStar(p, star) {
+  if (gameOver) return;
+  playStarSound();
+  star.destroy();
+  score++;
+  scoreText.setText(`Étoiles: ${score}`); // Texte mis à jour
+  timeRemaining++;
+
+  // Mettre à jour le meilleur score en temps réel (si vous le souhaitez)
+  if (score > bestScore) {
+      bestScore = score;
+      localStorage.setItem("bestScore", bestScore);
+  }
+
+  // --- AUGMENTATION DE LA DIFFICULTÉ ---
+  if (score > 0 && score % 10 === 0) {
+    // Augmenter les vitesses globales
+    PLAYER_SPEED += 15;
+    STAR_OBSTACLE_VELOCITY += 10;
+
+    // Ajouter un nouvel obstacle
+    spawnObstacle.call(this);
+
+    // Message visuel (optionnel)
+    let msg = this.add.text(GAME_WIDTH / 2, GAME_HEIGHT / 2, "⚡Difficulté augmentée ! ⚡",
+        { font: "28px Arial", fill: "#ffaa00", stroke: "#000", strokeThickness: 4 }
+    ).setOrigin(0.5);
+    this.tweens.add({ targets: msg, alpha: 0, duration: 1500, delay: 500, onComplete: () => msg.destroy() });
+  }
+
+  // Spawn d'une pénalité tous les 5 (comme avant)
+  if (score % 5 === 0) {
+    spawnPenalty.call(this);
+  }
+
+  // --- RÉAPPROVISIONNEMENT DES ÉTOILES ---
+  // Si on manque d'étoiles, on en rajoute.
+  if (stars.countActive() < 10) {
+    spawnStars.call(this, 10);
+  }
+}
+
+function spawnPenalty(){
+  let p=penalties.create(Phaser.Math.Between(50,GAME_WIDTH-50),Phaser.Math.Between(50,GAME_HEIGHT-50),'penalty');
+  p.setScale(0.5).setBounce(1).setCollideWorldBounds(true);
+  // Utilise la vélocité actuelle
+  p.setVelocity(Phaser.Math.Between(-STAR_OBSTACLE_VELOCITY,STAR_OBSTACLE_VELOCITY),
+                Phaser.Math.Between(-STAR_OBSTACLE_VELOCITY,STAR_OBSTACLE_VELOCITY));
+}
+
+function hitPenalty(p,pen){
+  if(gameOver) return;
+  playPenaltySound();
+  timeRemaining-=3;
+  pen.destroy();
+  if(timeRemaining<=0)failLevel.call(this,"💀 Temps épuisé !");
+}
+
+function hitObstacle(){
+  if(gameOver) return;
+  playObstacleSound();
+  failLevel.call(this,"💥GAME OVER!");
+}
+
+// ---------- ÉCHECS ----------
+function failLevel(message){
+  if(gameOver)return; gameOver=true; this.physics.pause();
+  attempts++;
+
+  // Sauvegarder le meilleur score à la mort
+  if (score > bestScore) {
+      bestScore = score;
+      localStorage.setItem("bestScore", bestScore);
+  }
+
+  this.add.text(GAME_WIDTH/2,GAME_HEIGHT/2-60,message,{font:"32px Arial",fill:"#ff3333"}).setOrigin(0.5);
+  this.add.text(GAME_WIDTH/2,GAME_HEIGHT/2,`Tentative ${attempts}/${MAX_ATTEMPTS}`,{font:"24px Arial",fill:"#fff"}).setOrigin(0.5);
+
+  if(attempts<MAX_ATTEMPTS){
+    let retry=this.add.text(GAME_WIDTH/2,GAME_HEIGHT/2+60,"🔄 Rejouer",{font:"28px Arial",fill:"#00ffcc"}).setOrigin(0.5).setInteractive();
+    retry.on('pointerdown',()=>{gameOver=false; this.scene.restart();});
+  } else {
+    let restart=this.add.text(GAME_WIDTH/2,GAME_HEIGHT/2+60,"↩️ Retour au Menu",{font:"26px Arial",fill:"#ffd700"}).setOrigin(0.5).setInteractive();
+    // --- Nettoyage pour le retour au menu ---
+    restart.on('pointerdown',()=>{
+      attempts=0;
+      this.scene.start('MenuScene');
+    });
+  }
+}
+
+// ---------- SUPPRESSION DE nextLevel() ----------
+// La fonction nextLevel() n'est plus nécessaire car le jeu est continu.
+
+// ---------- PAUSE & QUITTER ----------
+function togglePause(){isPaused=!isPaused; isPaused?this.physics.pause():this.physics.resume();}
+function quitToMenu(){this.scene.start('MenuScene');}
+
+new Phaser.Game(config);
+</script>
+</body>
+</html>
